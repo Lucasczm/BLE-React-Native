@@ -6,107 +6,175 @@
  * @flow strict-local
  */
 
-import React from 'react';
-import type {Node} from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   SafeAreaView,
   ScrollView,
-  StatusBar,
   StyleSheet,
   Text,
-  useColorScheme,
-  View,
+  Platform, PermissionsAndroid, TouchableOpacity
 } from 'react-native';
 
-import {
-  Colors,
-  DebugInstructions,
-  Header,
-  LearnMoreLinks,
-  ReloadInstructions,
-} from 'react-native/Libraries/NewAppScreen';
 
-const Section = ({children, title}): Node => {
-  const isDarkMode = useColorScheme() === 'dark';
-  return (
-    <View style={styles.sectionContainer}>
-      <Text
-        style={[
-          styles.sectionTitle,
-          {
-            color: isDarkMode ? Colors.white : Colors.black,
-          },
-        ]}>
-        {title}
-      </Text>
-      <Text
-        style={[
-          styles.sectionDescription,
-          {
-            color: isDarkMode ? Colors.light : Colors.dark,
-          },
-        ]}>
-        {children}
-      </Text>
-    </View>
-  );
-};
+import BluetoothStateManager from 'react-native-bluetooth-state-manager';
 
-const App: () => Node = () => {
-  const isDarkMode = useColorScheme() === 'dark';
+import { BleManager } from 'react-native-ble-plx';
+import { Buffer } from 'buffer';
 
-  const backgroundStyle = {
-    backgroundColor: isDarkMode ? Colors.darker : Colors.lighter,
+const manager = new BleManager();
+
+
+const App = () => {
+
+  const [device, setDevice] = useState({
+    connected: false,
+    device: null,
+    characteristics: []
+  })
+  const [msg, setMessage] = useState("");
+  const scrollViewRef = useRef();
+  useEffect(() => {
+    if (Platform.OS === 'ios') {
+      // Request IOS Bluetooth Permission/ON
+    } else {
+      PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+      ).then(() => {
+        BluetoothStateManager.enable()
+          .then(result => {
+            //Procura o nome UART Service
+            scanAndConnect("UART Service");
+          })
+          .catch(err => {
+            console.error('ble err', err);
+          });
+      });
+    }
+  }, [])
+
+
+  const monitor = (err, cha) => {
+    if (err) {
+      console.error('Erro monitor', err);
+      return;
+    }
+    let buff = Buffer.from(cha?.value, 'base64').toString('ascii');
+    console.log("MSG BLE:", buff);
+    setMessage(previousState => previousState + buff);
+  }
+
+  const sendMessage = (msg) => {
+    if (device.characteristics[1])
+      device.characteristics[1].writeWithoutResponse(Buffer.from(msg).toString('base64'))
+        .then(() => {
+          console.log('Mensagem enviada');
+        })
+        .catch(e => console.error('Error', e));
+
+  }
+
+  const scanAndConnect = async (deviceName, cb) => {
+    manager.startDeviceScan(null, null, async (error, deviceCb) => {
+      if (error) {
+        console.error("BLE Scan", error)
+        return;
+      }
+      // procura pelo nome do dispositivo
+      if (deviceCb.name === deviceName) {
+        console.log('Found BLE', deviceCb.name);
+        //Para de procurar quando encontrado
+        manager.stopDeviceScan();
+        const connectedDevice = await deviceCb.connect();
+
+        //descobre lista de serviços e caracteristicas
+        const allServicesAndCharacteristics =
+          await connectedDevice.discoverAllServicesAndCharacteristics();
+        //descobre os serviços
+        const discoveredServices =
+          await allServicesAndCharacteristics.services();
+
+        //Filtra o serviço UART do ESP32 "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+        const serviceUUID = discoveredServices.filter(service => service.uuid === "6e400001-b5a3-f393-e0a9-e50e24dcca9e")[0];
+
+        if (!serviceUUID) {
+          console.error("BLE Service UUID not found");
+          return;
+        }
+
+        //obtem caracteristicas do serviço
+        const characteristics = await serviceUUID.characteristics();
+
+        //pega a primeira caracteristica e seta o monitor ( 0 para ler, 1 pra escrever)
+        characteristics[0].monitor(monitor);
+        characteristics[1].writeWithoutResponse(Buffer.from("Conectado").toString('base64'))
+          .then(() => {
+            console.log('Mensagem enviada');
+          })
+          .catch(e => console.error('Error', e));
+
+        //seta estado da conexão
+        setDevice({
+          connected: true,
+          device: deviceCb,
+          characteristics: characteristics //vetor (0 para ler , 1 para escrever)
+        })
+      }
+    });
   };
 
+
   return (
-    <SafeAreaView style={backgroundStyle}>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-      <ScrollView
-        contentInsetAdjustmentBehavior="automatic"
-        style={backgroundStyle}>
-        <Header />
-        <View
-          style={{
-            backgroundColor: isDarkMode ? Colors.black : Colors.white,
-          }}>
-          <Section title="Step One">
-            Edit <Text style={styles.highlight}>App.js</Text> to change this
-            screen and then come back to see your edits.
-          </Section>
-          <Section title="See Your Changes">
-            <ReloadInstructions />
-          </Section>
-          <Section title="Debug">
-            <DebugInstructions />
-          </Section>
-          <Section title="Learn More">
-            Read the docs to discover what to do next:
-          </Section>
-          <LearnMoreLinks />
-        </View>
+    <SafeAreaView style={styles.Container}>
+      <Text style={[styles.Header, { marginTop: 10 }]}>{(device.connected) ? 'Conectado' : 'Não Conectado'}</Text>
+      <Text style={styles.Header}>Recebido BLE:</Text>
+      <ScrollView ref={scrollViewRef} style={styles.ScrollView} contentContainerStyle={styles.ScrollViewContent}
+        onContentSizeChange={() => scrollViewRef.current.scrollToEnd({ animated: true })}>
+        <Text style={styles.Text}>
+          {msg}
+        </Text>
       </ScrollView>
+      <TouchableOpacity style={styles.Button} onPress={() => { sendMessage("Oi\n") }}><Text>ENVIAR BLE</Text></TouchableOpacity>
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  sectionContainer: {
-    marginTop: 32,
-    paddingHorizontal: 24,
+
+  Container: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    flex: 1,
   },
-  sectionTitle: {
-    fontSize: 24,
-    fontWeight: '600',
+  Header: {
+    marginLeft: 10,
+    fontSize: 16,
+    alignSelf: "flex-start"
   },
-  sectionDescription: {
-    marginTop: 8,
-    fontSize: 18,
-    fontWeight: '400',
+  ScrollView: {
+    paddingHorizontal: 10,
+    alignSelf: "stretch",
+    margin: 10,
+    backgroundColor: '#444',
+    borderRadius: 5,
+
   },
-  highlight: {
-    fontWeight: '700',
+  Text: {
+    color: "#FFF",
   },
-});
+  ScrollViewContent: {
+    padding: 5,
+    marginBottom: 10,
+  },
+  Button: {
+    height: 40,
+    margin: 10,
+    alignSelf: 'stretch',
+    borderRadius: 10,
+    backgroundColor: "#DADADA",
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
+  }
+})
 
 export default App;
